@@ -2,8 +2,13 @@ package resolver
 
 import (
 	"fmt"
+	"net/http"
+	"path/filepath"
 	"slices"
 	"sync"
+
+	"github.com/musannif-md/musannif/internal/config"
+	"github.com/musannif-md/musannif/internal/utils"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -14,13 +19,15 @@ const (
 )
 
 type sessionInfo struct {
-	sockets []*websocket.Conn
-	solver  *DiffSolver
+	host     *websocket.Conn
+	solver   *DiffSolver
+	sockets  []*websocket.Conn
+	channels []*chan error
 }
 
 type SessionInfoMap struct {
-	conns map[uuid.UUID]sessionInfo
 	mu    sync.Mutex
+	conns map[uuid.UUID]sessionInfo
 }
 
 var (
@@ -29,18 +36,34 @@ var (
 	}
 )
 
-func OnClientConnect(uuid uuid.UUID, ws *websocket.Conn) error {
+func OnClientConnect(
+	cfg *config.AppConfig,
+	uuid uuid.UUID,
+	ws *websocket.Conn,
+	r *http.Request,
+	readerFinished chan error,
+) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	si, ok := m.conns[uuid]
+	si, sessionExists := m.conns[uuid]
 
-	if !ok {
+	// Session initiator must provide notename via query parameter!
+	if !sessionExists {
+		username := r.Context().Value("username").(string)
+		noteName := r.URL.Query().Get("note_name")
+		if noteName == "" {
+			return fmt.Errorf("expected note name from session initiator `/note_name`")
+		}
+
+		noteName += ".md"
+
+		path := filepath.Join(cfg.App.NoteDirectory, username, noteName)
+
 		si = sessionInfo{
-			sockets: make([]*websocket.Conn, 0, WS_ARR_START_CAP),
-			solver: &DiffSolver{
-				fpath: "notes/username/test-note-1.md", // TODO: extract username/note via JWT?
-			},
+			sockets:  make([]*websocket.Conn, 0, WS_ARR_START_CAP),
+			channels: make([]*chan error, 0, WS_ARR_START_CAP),
+			solver:   &DiffSolver{fpath: path},
 		}
 
 		err := si.solver.initialize()
@@ -48,9 +71,11 @@ func OnClientConnect(uuid uuid.UUID, ws *websocket.Conn) error {
 			return fmt.Errorf("failed to initialize diffSolver instance: %w", err)
 		}
 
+		si.host = ws
 	}
 
 	si.sockets = append(si.sockets, ws)
+	si.channels = append(si.channels, &readerFinished)
 	m.conns[uuid] = si
 
 	return nil
@@ -71,8 +96,6 @@ func OnClientWrite(uuid uuid.UUID, ws *websocket.Conn, msg string) error {
 	if err != nil {
 		return fmt.Errorf("diff resolution failed: %w", err)
 	}
-
-	// fmt.Println(msg)
 
 	for _, c := range si.sockets {
 		err := c.WriteMessage(websocket.TextMessage, []byte(msg))
@@ -98,10 +121,25 @@ func OnClientDisconnect(uuid uuid.UUID, ws *websocket.Conn) error {
 	for i, s := range si.sockets {
 		if s == ws {
 			si.sockets = slices.Delete(si.sockets, i, i+1)
+			si.channels = slices.Delete(si.channels, i, i+1)
 		}
 	}
 
 	m.conns[uuid] = si
+
+	if ws == si.host {
+		for i, s := range si.sockets {
+			closeErr := fmt.Errorf("session host disconnected")
+
+			err := utils.WriteCloseMsg(s, websocket.ClosePolicyViolation, closeErr)
+
+			if err != nil {
+				*si.channels[i] <- fmt.Errorf("failed to send close message: %w", err)
+			} else {
+				*si.channels[i] <- closeErr
+			}
+		}
+	}
 
 	if len(si.sockets) == 0 {
 		si.solver.cleanup()

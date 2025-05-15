@@ -37,9 +37,11 @@ func GenerateToken(userID string) (string, error) {
 }
 
 func ValidateToken(tokenString string) (*CustomClaims, error) {
-	token, err := jwt.ParseWithClaims(tokenString, &CustomClaims{}, func(token *jwt.Token) (interface{}, error) {
-		return accessSecret, nil
-	})
+	token, err := jwt.ParseWithClaims(
+		tokenString,
+		&CustomClaims{},
+		func(token *jwt.Token) (any, error) { return accessSecret, nil },
+	)
 
 	if err != nil {
 		return nil, err
@@ -51,4 +53,3 @@ func ValidateToken(tokenString string) (*CustomClaims, error) {
 
 	return nil, fmt.Errorf("unknown claims type (invalid key), cannot proceed")
 }
-

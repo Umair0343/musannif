@@ -13,7 +13,6 @@ import (
 )
 
 type noteCreateReq struct {
-	Username string `json:"username"`
 	NoteName string `json:"note_name"`
 	Content  string `json:"content"`
 }
@@ -26,10 +25,6 @@ type noteContent struct {
 	Content string `json:"content"`
 }
 
-type noteListReq struct {
-	Username string `json:"username"`
-}
-
 func CreateNote(cfg *config.AppConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req noteCreateReq
@@ -39,13 +34,15 @@ func CreateNote(cfg *config.AppConfig) http.HandlerFunc {
 			return
 		}
 
-		if req.NoteName == "" || req.Username == "" {
-			http.Error(w, "Username/note name not provided", http.StatusBadRequest)
+		if req.NoteName == "" {
+			http.Error(w, "note name not provided", http.StatusBadRequest)
 			return
 		}
 
+		username := r.Context().Value("username").(string)
+
 		// Make directories
-		notesDirPath := filepath.Join(cfg.App.NoteDirectory, req.Username)
+		notesDirPath := filepath.Join(cfg.App.NoteDirectory, username)
 		err = os.MkdirAll(notesDirPath, os.ModePerm)
 		if err != nil {
 			http.Error(w, "error initializing note directory: %v\n", http.StatusInternalServerError)
@@ -75,7 +72,7 @@ func CreateNote(cfg *config.AppConfig) http.HandlerFunc {
 		}
 
 		// Insert file info in DB
-		id, err := db.CreateNote(req.Username, req.NoteName)
+		id, err := db.CreateNote(username, req.NoteName)
 		if err != nil {
 			http.Error(w, "failed to create note in DB", http.StatusInternalServerError)
 			logger.Log.Error().Err(err).Msg("failed to create note in DB")
@@ -101,8 +98,8 @@ func DeleteNote(cfg *config.AppConfig) http.HandlerFunc {
 			return
 		}
 
-		if req.NoteName == "" || req.Username == "" {
-			http.Error(w, "Username/note name not provided", http.StatusBadRequest)
+		if req.NoteName == "" {
+			http.Error(w, "note name not provided", http.StatusBadRequest)
 			return
 		}
 
@@ -113,9 +110,11 @@ func DeleteNote(cfg *config.AppConfig) http.HandlerFunc {
 			the database's function to rollback if the filesystem delete fails
 		*/
 
+		username := r.Context().Value("username").(string)
+
 		// Delete database entry
 		req.NoteName += ".md"
-		err = db.DeleteNote(req.Username, req.NoteName)
+		err = db.DeleteNote(username, req.NoteName)
 		if err != nil {
 			http.Error(w, "failed to delete note from DB", http.StatusInternalServerError)
 			logger.Log.Error().Err(err).Msg("failed to delete note from DB")
@@ -123,7 +122,7 @@ func DeleteNote(cfg *config.AppConfig) http.HandlerFunc {
 		}
 
 		// Delete file
-		path := filepath.Join(cfg.App.NoteDirectory, req.Username, req.NoteName)
+		path := filepath.Join(cfg.App.NoteDirectory, username, req.NoteName)
 		err = os.Remove(path)
 		if err != nil {
 			http.Error(w, "failed to delete note file", http.StatusInternalServerError)
@@ -143,13 +142,15 @@ func FetchNoteData(cfg *config.AppConfig) http.HandlerFunc {
 			return
 		}
 
-		if req.NoteName == "" || req.Username == "" {
-			http.Error(w, "Username/note name not provided", http.StatusBadRequest)
+		if req.NoteName == "" {
+			http.Error(w, "note name not provided", http.StatusBadRequest)
 			return
 		}
 
+		username := r.Context().Value("username").(string)
+
 		req.NoteName += ".md"
-		path := filepath.Join(cfg.App.NoteDirectory, req.Username, req.NoteName)
+		path := filepath.Join(cfg.App.NoteDirectory, username, req.NoteName)
 
 		content, err := os.ReadFile(path)
 		if err != nil {
@@ -157,7 +158,7 @@ func FetchNoteData(cfg *config.AppConfig) http.HandlerFunc {
 			logger.Log.Error().Err(err).Msg("failed to read note")
 			return
 		}
-	
+
 		// TODO: base64 encode contents over first...
 
 		data := noteContent{
@@ -171,18 +172,9 @@ func FetchNoteData(cfg *config.AppConfig) http.HandlerFunc {
 
 func FetchNoteList(cfg *config.AppConfig) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		var req noteListReq
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "Invalid request body", http.StatusBadRequest)
-			return
-		}
+		username := r.Context().Value("username").(string)
 
-		if req.Username == "" {
-			http.Error(w, "Username not provided", http.StatusBadRequest)
-			return
-		}
-
-		noteListMd, err := db.GetUserNoteMetadata(req.Username)
+		noteListMd, err := db.GetUserNoteMetadata(username)
 		if err != nil {
 			http.Error(w, "failed to get metadata of user's notes", http.StatusInternalServerError)
 			logger.Log.Error().Err(err).Msg("failed to get metadata of user's notes")

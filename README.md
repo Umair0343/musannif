@@ -14,18 +14,11 @@ Server for Musannif, A sophisticated collaborative Markdown editor designed for 
 - If a central server is reaching computational limits, it informs a master server to spin up a new server to handle the load, and transmits data to it, as well as transferring clients to it
 - CHECK: Move database to a separate server that communicates with the master and/or worker servers
 
-## Usage
-
-```bash
-./musannif --signup -username <username> -password <password> # Optional
-./musannif -serve
-```
-
 ## Installing
 
-- 
+- The easiest way to install Musannif is to simply grab an automatically created release
 
-### Locally
+### Build locally
 
 ```bash
 git clone https://github.com/musannif-md/musannif.git
@@ -34,20 +27,30 @@ cp config_example.yaml config.yaml # and modify the new file accordingly
 make
 ```
 
+## Usage
+
+```bash
+./musannif --signup -username <username> -password <password> # Optional
+./musannif -serve
+```
+
 ## TODO
 
 - [x] Init a basic logger - create wrapper over zerolog
 - [x] Mete out system architecture - how to approach horizontal scaling?
 - [x] CI/CD: Publish new 'release' whenever a tagged commit is pushed
-- [ ] Extract username from JWT as opposed to relying on JSON body
-- [ ] v1.0
-  - [x] File/'Note' management on disk
-  - [x] simple web-client for single user to create/edit their notes
-  - [ ] Single user note modification
-- [ ] v2.0
-  - [ ] Real-time collaboration w/ multiple users
-  - [ ] Note sharing via URL - let guests view notes
-- [ ] v3.0 User directory/Team management
+- [x] File/'Note' management on disk
+- [x] Core websocket architecture
+- [x] Ping-pong
+- [x] Extract username from JWT as opposed to relying on JSON body
+- [ ] Diff algorithm
+    - [ ] Single user note modification
+    - [ ] Concurrency: real-time collaboration w/ multiple users
+- [ ] **Bug**: note name shouldn't contain extension whilst being stored/passed
+- [x] Disconnect other clients if the host disconnects
+- [ ] Note sharing via URL
+- [ ] Fix Dockerfile, add persistent storage + networking support (through Docker Compose?) & configure CI/CD for pushing image to DockerHub
+- [ ] User directory/Team management
 - [ ] Shift to Protobufs
 - [ ] 'Recently Deleted' note section
 - [ ] ???

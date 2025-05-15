@@ -8,17 +8,20 @@ import (
 	"github.com/musannif-md/musannif/internal/config"
 	"github.com/musannif-md/musannif/internal/logger"
 	"github.com/musannif-md/musannif/internal/resolver"
+	"github.com/musannif-md/musannif/internal/utils"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 )
 
 const (
-	closeDeadline = 10 * time.Second
+	pongWait   = 20 * time.Second
+	pingPeriod = pongWait * 9 / 10
 )
 
 var (
 	upgrader = websocket.Upgrader{
+		EnableCompression: true,
 		CheckOrigin: func(r *http.Request) bool {
 			return true
 		},
@@ -28,12 +31,12 @@ var (
 func validateSid(r *http.Request) (uuid.UUID, error) {
 	uuidStr := r.URL.Query().Get("sid")
 	if uuidStr == "" {
-		return uuid.Nil, fmt.Errorf("expected session ID (uuid) via query parameter `/sid`")
+		return uuid.Nil, fmt.Errorf("expected session ID via query parameter `/sid`")
 	}
 
 	sidUUID, err := uuid.Parse(uuidStr)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("couldn't parse session ID (uuid): %w", err)
+		return uuid.Nil, fmt.Errorf("couldn't parse session ID: %w", err)
 	}
 
 	return sidUUID, nil
@@ -55,56 +58,106 @@ func CreateWsConn(cfg *config.AppConfig) http.HandlerFunc {
 		if err != nil {
 			logger.Log.Err(err).Msgf("session ID (uuid) error")
 
-			err := ws.WriteControl(
-				websocket.CloseMessage,
-				websocket.FormatCloseMessage(websocket.CloseUnsupportedData, "couldn't parse session ID (uuid)"),
-				time.Now().Add(closeDeadline),
-			)
+			err := utils.WriteCloseMsg(ws, websocket.CloseUnsupportedData, fmt.Errorf("missing/invalid session ID"))
 
 			if err != nil {
-				logger.Log.Err(err).Msgf("couldn't send close message to connection")
+				logger.Log.Err(err).Msgf(utils.UnableToSendCloseMsg)
 			}
 
 			return
 		}
 
-		err = diffReader(sidUUID, ws)
+		err = wsTransmission(cfg, sidUUID, ws, r)
 		if err != nil {
-			logger.Log.Err(err).Msg("reading ws json msg failed")
+			logger.Log.Err(err).Msg("websocket died")
+		}
+	}
+}
+
+func wsTransmission(cfg *config.AppConfig, sid uuid.UUID, ws *websocket.Conn, r *http.Request) error {
+	stopReading := make(chan error)
+	pingTicker := time.NewTicker(pingPeriod)
+	connectErr := resolver.OnClientConnect(cfg, sid, ws, r, stopReading)
+	if connectErr != nil {
+		err := utils.WriteCloseMsg(ws, websocket.ClosePolicyViolation, connectErr)
+
+		if err != nil {
+			logger.Log.Err(err).Msgf(utils.UnableToSendCloseMsg)
+		}
+
+		return connectErr
+	}
+
+	defer func() {
+		resolver.OnClientDisconnect(sid, ws)
+		pingTicker.Stop()
+		ws.Close()
+	}()
+
+	go readFromWs(sid, ws, stopReading)
+
+	for {
+		select {
+		case reason := <-stopReading: // if someone signalled the end of reading or wants us to be closed
+			return reason
+		case <-pingTicker.C: // Send sporadic pings
 			err := ws.WriteControl(
-				websocket.CloseMessage,
-				websocket.FormatCloseMessage(websocket.CloseUnsupportedData, "expected"),
-				time.Now().Add(closeDeadline),
+				websocket.PingMessage,
+				[]byte{},
+				time.Now().Add(utils.CloseDeadline),
 			)
 
 			if err != nil {
-				logger.Log.Err(err).Msgf("couldn't send close message to connection [%s]", sidUUID)
+				return fmt.Errorf("failed to send ping: %w", err)
 			}
 		}
 	}
 }
 
-func diffReader(sid uuid.UUID, ws *websocket.Conn) error {
-	resolver.OnClientConnect(sid, ws)
-	defer resolver.OnClientDisconnect(sid, ws)
+func readFromWs(sid uuid.UUID, ws *websocket.Conn, readerFinished chan error) {
+	defer close(readerFinished)
 
-	// TODO: add ping-ponging via ticker in for loop w/ select or some shit, I don't know
+	ws.SetReadDeadline(time.Now().Add(pongWait))
+	ws.SetPongHandler(func(appdata string) error {
+		ws.SetReadDeadline(time.Now().Add(pongWait))
+		return nil
+	})
 
 	for {
-		var msg map[string]any
-		err := ws.ReadJSON(&msg)
+		var msgJson map[string]any
+
+		// Blocks on read call. Closes return an error here.
+		err := ws.ReadJSON(&msgJson)
 		if err != nil {
-			return fmt.Errorf("reading from connection with session id [%s] failed: %w", sid.String(), err)
+			if _, ok := err.(*websocket.CloseError); ok {
+				readerFinished <- nil
+			} else {
+				readerFinished <- fmt.Errorf("reading from connection with session id [%s] failed: %w", sid.String(), err)
+			}
+			break
 		}
 
-		textMsg, ok := msg["text"].(string)
+		// Parse recieved message
+		textStr, ok := msgJson["text"].(string)
 		if !ok {
-			return fmt.Errorf("json object didn't contain key 'text'")
+			closeErr := fmt.Errorf("json object didn't contain key 'text'")
+
+			err := utils.WriteCloseMsg(ws, websocket.CloseUnsupportedData, closeErr)
+
+			if err != nil {
+				readerFinished <- fmt.Errorf("failed to send close message: %w", err)
+			} else {
+				readerFinished <- closeErr
+			}
+
+			break
 		}
 
-		err = resolver.OnClientWrite(sid, ws, textMsg)
+		// Propagate message to diff resolver
+		err = resolver.OnClientWrite(sid, ws, textStr)
 		if err != nil {
-			return fmt.Errorf("resolver failed to write in session id [%s] w/ err: %w", sid.String(), err)
+			readerFinished <- fmt.Errorf("resolver failed to write in session id [%s] w/ err: %w", sid.String(), err)
+			break
 		}
 	}
 }
